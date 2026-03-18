@@ -121,57 +121,105 @@ def split_message_into_chats(text: str, max_length: int = 100) -> list[str]:
 
 
 async def synthesize_forward_message(forward_msg: dict, bot: Bot) -> str:
-    """合成消息数组内容为字符串
-    这是一个示例的消息集合/数组：
-    [
-        {
-            "type": "node",
-            "data": {
-                "user_id": "10001000",
-                "nickname": "某人",
-                "content": "[CQ:face,id=123]哈喽～",
-            }
-        },
-        {
-            "type": "node",
-            "data": {
-                "user_id": "10001001",
-                "nickname": "某人",
-                "content": [
-                    {"type": "face", "data": {"id": "123"}},
-                    {"type": "text", "data": {"text": "哈喽～"}},
-                ]
-            }
-        }
-    ]
-    """
+    """合成消息数组内容为字符串"""
     result = ""
-    for segment in forward_msg:
+    
+    # 第一步：正确提取 messages 数组
+    messages = []
+    
+    # 情况1：forward_msg 是包含 "messages" 键的字典
+    if isinstance(forward_msg, dict) and "messages" in forward_msg:
+        messages = forward_msg["messages"]
+    # 情况2：forward_msg 本身就是消息数组
+    elif isinstance(forward_msg, list):
+        messages = forward_msg
+    else:
+        # 未知格式
+        logger.warning(f"未知的转发消息格式: {type(forward_msg)} - {forward_msg}")
+        return "<!--无法解析的转发消息格式-->"
+    
+    # 第二步：处理消息数组
+    for segment in messages:
         try:
-            if isinstance(segment["data"], str):
+            # 检查 segment 是否为有效的消息节点
+            if not isinstance(segment, dict):
+                result += f"<!--无效的消息段: {segment}-->\n"
+                continue
+                
+            if "type" not in segment or segment.get("type") != "node":
+                result += f"<!--非节点消息段: {segment}-->\n"
+                continue
+                
+            if "data" not in segment:
+                result += f"<!--消息段缺少data字段: {segment}-->\n"
+                continue
+                
+            # 处理 data 字段
+            data = segment["data"]
+            
+            # 如果 data 是字符串，尝试解析为 JSON
+            if isinstance(data, str):
                 try:
-                    segment["data"] = json.loads(segment["data"])
+                    data = json.loads(data)
                 except Exception:
-                    result += segment["data"] + "<!--该消息段无法被解析-->"
-            nickname: str = segment["data"]["nickname"]
-            qq: str = segment["data"]["user_id"]
-            result += f"[{nickname}({qq})]说："
-            if isinstance(segment["data"]["content"], str):
-                result += f"{segment['data']['content']}"
-            elif isinstance(segment["data"]["content"], list):
-                for segments in segment["data"]["content"]:
-                    match segments["type"]:
+                    result += f"{data}<!--该消息段无法被解析-->\n"
+                    continue
+            
+            # 确保 data 是字典
+            if not isinstance(data, dict):
+                result += f"<!--data字段格式不正确: {data}-->\n"
+                continue
+                
+            # 获取用户信息
+            nickname = data.get("nickname", "未知用户")
+            user_id = data.get("user_id", "未知QQ")
+            result += f"[{nickname}({user_id})]说："
+            
+            # 处理消息内容
+            content = data.get("content", "")
+            
+            if isinstance(content, str):
+                # 如果 content 是字符串，直接使用
+                result += f"{content}"
+            elif isinstance(content, list):
+                # 如果 content 是消息段数组，递归解析
+                for msg_segment in content:
+                    if not isinstance(msg_segment, dict):
+                        continue
+                        
+                    segment_type = msg_segment.get("type", "")
+                    segment_data = msg_segment.get("data", {})
+                    
+                    match segment_type:
                         case "text":
-                            result += f"{segments['data']['text']}"
+                            result += f"{segment_data.get('text', '')}"
                         case "at":
-                            result += f" [@{segments['data']['qq']}]"
+                            result += f" [@{segment_data.get('qq', '')}]"
+                        case "face":
+                            result += f"[表情:{segment_data.get('id', '')}]"
+                        case "image":
+                            result += f"[图片:{segment_data.get('file', '')}]"
+                        case "record":
+                            result += f"[语音:{segment_data.get('file', '')}]"
                         case "forward":
-                            result += f"\\（合并转发:{await synthesize_forward_message(await bot.get_forward_msg(id=segments['data']['id']), bot)}）\\"
+                            if "id" in segment_data:
+                                try:
+                                    nested_forward = await bot.get_forward_msg(id=segment_data["id"])
+                                    result += f"\\（嵌套转发:{await synthesize_forward_message(nested_forward, bot)}）\\"
+                                except Exception as e:
+                                    result += f"\\（转发消息获取失败:{e}）\\"
+                        case _:
+                            result += f"[{segment_type}消息]"
+            else:
+                result += f"<!--未知内容格式: {type(content).__name__}-->"
+                
         except Exception as e:
-            logger.opt(colors=True, exception=e).warning(f"解析消息时出错：{e!s}'")
+            logger.opt(colors=True, exception=e).warning(f"解析消息段时出错：{e!s}")
             result += f"\n<!--该消息段无法被解析--><origin>{segment!s}</origin>"
+        
         result += "\n"
-    return result
+    
+    return result.strip()
 
 
 async def synthesize_message(message: Message, bot: Bot) -> str:
