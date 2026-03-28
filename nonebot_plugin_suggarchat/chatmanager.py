@@ -643,6 +643,24 @@ class ChatObject:
         response = await self._process_chat(send_messages, abs_usage)
         debug_log("聊天处理完成，准备发送响应")
         await self.send_response(response.content)
+
+        # --- 新增逻辑：在保存前清理历史记录中的图片 ---
+        debug_log("清理历史记录中的多模态内容...")
+        for msg in self.data.memory.messages:
+            if isinstance(msg.content, list):
+                # 提取出所有的文本部分，拼接成纯文本字符串
+                text_only = ""
+                for part in msg.content:
+                    # 兼容 Pydantic 对象和普通字典格式
+                    if hasattr(part, "text"): # TextContent 对象
+                        text_only += part.text
+                    elif isinstance(part, dict) and part.get("type") == "text":
+                        text_only += part.get("text", "")
+                
+                # 将原来的 list[Content] 替换为纯文本 str
+                msg.content = text_only
+        # --- 清理结束 ---
+
         debug_log("开始保存记忆数据..")
         await self.data.save(event)
         debug_log("记忆数据保存完成")

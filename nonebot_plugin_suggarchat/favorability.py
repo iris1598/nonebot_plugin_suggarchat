@@ -145,25 +145,36 @@ async def _(bot: Bot, event: ChatEvent):
     eval_match = re.search(r'\[EVAL:(.*?)\]', response)
     stk_matches = re.findall(r'\[STK:(.*?)\]', response)
     
-    # 2. 清理文本 (model_response 必须保持为纯字符串)
+    # 2. 彻底清理文本 (确保 event.model_response 只留 AI 原话)
     clean_text = response
     clean_text = re.sub(r'\[FAV:[+-]?\d+\]', '', clean_text)
     clean_text = re.sub(r'\[EVAL:.*?\]', '', clean_text)
-    clean_text = re.sub(r'\[STK:.*?\]', '', clean_text)
+    clean_text = re.sub(r'\[STK:.*?\]', '', clean_text).strip()
+    event.model_response = clean_text # 写入干净的文本，防止被计入历史
     
-    # 3. 更新数据库
-    change = int(fav_match.group(1)) if fav_match else 0
+    # 3. 解析变动并手动钳制（确保显示数值与数据库逻辑一致）
+    raw_val = int(fav_match.group(1)) if fav_match else 0
+    change = max(-5, min(5, raw_val))  # <--- 这里加上同款限制
+    
     new_eval = eval_match.group(1) if eval_match else None
     user_data = await favor_db.update_data(nbevent, change, new_eval)
     
-    # 4. 把纯文本写回，确保插件能正常发送且不报错
-    event.model_response = f"{clean_text.strip()}\n(✨ 当前好感度: {user_data['score']})"
+    # 4. 异步补发“好感度详情”和“表情包”
+    async def send_extra_info():
+        await asyncio.sleep(0.5)
+        
+        # 补发好感度详情
+        try:
+            tips = f"✨ 当前好感度: {user_data['score']}"
+            if change != 0:
+                symbol = "+" if change > 0 else ""
+                tips += f" ({symbol}{change})"
+            await bot.send(event=nbevent, message=tips)
+        except Exception as e:
+            logger.error(f"好感度提示发送失败: {e}")
 
-    # 5. 异步跟发表情包 (不记录在历史上下文)
-    if stk_matches:
-        # 稍微延迟一下，确保在主回复之后发出
-        async def send_stickers():
-            await asyncio.sleep(0.5)
+        # 补发表情包
+        if stk_matches:
             for cat in stk_matches:
                 img_path = StickerManager.get_random_sticker_path(cat)
                 if img_path:
@@ -171,9 +182,8 @@ async def _(bot: Bot, event: ChatEvent):
                         await bot.send(event=nbevent, message=MessageSegment.image(img_path))
                     except Exception as e:
                         logger.error(f"补发表情包失败: {e}")
-        
-        asyncio.create_task(send_stickers())
-
+    
+    asyncio.create_task(send_extra_info())
 
 # ================= 指令部分 =================
 
