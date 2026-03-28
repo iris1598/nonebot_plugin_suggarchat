@@ -113,12 +113,13 @@ async def _(event: BeforeChatEvent):
     categories = StickerManager.get_categories()
     
     favor_prompt = (
-        f"\n[系统提示：用户好感度 {user_info['score']}，评价：{user_info['eval']}。请根据好感度做出不同的反应。\n"
-        f"该总分无上限下限。要求在回复末尾严格包含：\n"
-        f"1. [FAV:+X] 或 [FAV:-X]\n"
-        f"2. [EVAL:对用户的评价]\n"
-        f"3. (可选) 如需发送表情包，请在回复末尾加入 [STK:分类名]。可选：{', '.join(categories)}。\n"
-        f"标记对用户不可见。]"
+        f"\n[系统插件指令（对用户不可见）：\n"
+        f"1. 记忆状态：用户当前好感度 {user_info['score']}，你对他的评价是：{user_info['eval']}。\n"
+        f"2. 自由决策：你可以根据对话内容自由决定是否更新好感度或评价。**若不需要更新，则不输出下方标记**。\n"
+        f"3. 标记格式（仅在需要更新时置于回复末尾）：\n"
+        f"   - [FAV:±数值]：改变好感度（范围 -5 到 +5）。\n"
+        f"   - [EVAL:新评价]：如果你对用户的看法发生了改变，请输出此标记更新评价。\n"
+        f"   - [STK:分类名]：发送表情包，可选类别：{', '.join(categories)}。]\n"
     )
 
     try:
@@ -141,37 +142,44 @@ async def _(bot: Bot, event: ChatEvent):
     if not isinstance(nbevent, MessageEvent): return
 
     # 1. 提取所有标记
-    fav_match = re.search(r'\[FAV:([+-]?\d+)\]', response)
-    eval_match = re.search(r'\[EVAL:(.*?)\]', response)
-    stk_matches = re.findall(r'\[STK:(.*?)\]', response)
+    fav_match = re.search(r'\[FAV[:：]([+-]?\d+)\]', response)
+    eval_match = re.search(r'\[EVAL[:：](.*?)\]', response)
+    stk_matches = re.findall(r'\[STK[:：](.*?)\]', response)
     
-    # 2. 彻底清理文本 (确保 event.model_response 只留 AI 原话)
-    clean_text = response
-    clean_text = re.sub(r'\[FAV:[+-]?\d+\]', '', clean_text)
+    # 2. 彻底清理文本
+    clean_text = re.sub(r'\[FAV:[+-]?\d+\]', '', response)
     clean_text = re.sub(r'\[EVAL:.*?\]', '', clean_text)
     clean_text = re.sub(r'\[STK:.*?\]', '', clean_text).strip()
-    event.model_response = clean_text # 写入干净的文本，防止被计入历史
+    event.model_response = clean_text 
     
-    # 3. 解析变动并手动钳制（确保显示数值与数据库逻辑一致）
+    # 3. 解析变动（如果标签不存在，则 change=0, new_eval=None）
     raw_val = int(fav_match.group(1)) if fav_match else 0
-    change = max(-5, min(5, raw_val))  # <--- 这里加上同款限制
+    change = max(-5, min(5, raw_val))
+    new_eval = eval_match.group(1).strip() if eval_match else None
     
-    new_eval = eval_match.group(1) if eval_match else None
-    user_data = await favor_db.update_data(nbevent, change, new_eval)
+    # 只有在有变动时才调用数据库
+    user_data = await favor_db.get_user_info(nbevent)
+    if change != 0 or new_eval is not None:
+        user_data = await favor_db.update_data(nbevent, change, new_eval)
     
-    # 4. 异步补发“好感度详情”和“表情包”
+    # 4. 异步补发详情
     async def send_extra_info():
         await asyncio.sleep(0.5)
         
-        # 补发好感度详情
-        try:
-            tips = f"✨ 当前好感度: {user_data['score']}"
-            if change != 0:
-                symbol = "+" if change > 0 else ""
-                tips += f" ({symbol}{change})"
-            await bot.send(event=nbevent, message=tips)
-        except Exception as e:
-            logger.error(f"好感度提示发送失败: {e}")
+        # 构造提示信息
+        tips_parts = []
+        if change != 0:
+            symbol = "+" if change > 0 else ""
+            tips_parts.append(f"好感度 {symbol}{change} (当前: {user_data['score']})")
+        
+        if new_eval is not None:
+            tips_parts.append("评价已更新 ✨")
+
+        if tips_parts:
+            try:
+                await bot.send(event=nbevent, message=" | ".join(tips_parts))
+            except Exception as e:
+                logger.error(f"提示发送失败: {e}")
 
         # 补发表情包
         if stk_matches:

@@ -544,3 +544,89 @@ class OpenAIAdapter(ModelAdapter):
     @staticmethod
     def get_adapter_protocol() -> tuple[str, ...]:
         return "openai", "__main__"
+
+class QwenAdapter(ModelAdapter):
+    """通义千问 (Qwen) 协议适配器"""
+
+    async def call_api(
+        self, messages: Iterable[ChatCompletionMessageParam]
+    ) -> UniResponse[str, None]:
+        preset = self.preset  # 这里的 preset 就是 ModelPreset 实例
+        config = self.config
+        
+        # 直接从预设文件的 extra 字典中获取 Qwen 特有参数
+        # 默认值设置为 None，只有在 JSON 里配置了才会发送
+        extra_body = {}
+        qwen_params = ["enable_thinking", "thinking_budget", "enable_code_interpreter", "enable_search"]
+        
+        for param in qwen_params:
+            if param in preset.extra:
+                extra_body[param] = preset.extra[param]
+
+        client = openai.AsyncOpenAI(
+            base_url=preset.base_url,
+            api_key=preset.api_key,
+            timeout=config.llm_config.llm_timeout,
+            max_retries=config.llm_config.max_retries,
+        )
+
+        create_params = {
+            "model": preset.model,
+            "messages": messages,
+            "max_tokens": config.llm_config.max_tokens,
+            "stream": config.llm_config.stream,
+        }
+        
+        # 只有当 extra 确实有内容时才加入 extra_body
+        if extra_body:
+            create_params["extra_body"] = extra_body
+
+        if config.llm_config.stream:
+            create_params["stream_options"] = {"include_usage": True}
+            completion = await client.chat.completions.create(**create_params)
+        else:
+            completion = await client.chat.completions.create(**create_params)
+
+        response_text: str = ""
+        reasoning_text: str = ""
+        uni_usage = None
+
+        if config.llm_config.stream and isinstance(completion, openai.AsyncStream):
+            async for chunk in completion:
+                try:
+                    if chunk.usage:
+                        uni_usage = UniResponseUsage.model_validate(chunk.usage, from_attributes=True)
+                    if chunk.choices and chunk.choices[0].delta:
+                        delta = chunk.choices[0].delta
+                        if delta.content:
+                            response_text += delta.content
+                        # 处理通义千问特有的思考内容字段
+                        if hasattr(delta, "reasoning_content") and delta.reasoning_content:
+                            reasoning_text += delta.reasoning_content
+                except (IndexError, AttributeError):
+                    break
+        else:
+            if isinstance(completion, ChatCompletion):
+                msg = completion.choices[0].message
+                response_text = msg.content or ""
+                if hasattr(msg, "reasoning_content") and msg.reasoning_content:
+                    reasoning_text = msg.reasoning_content
+                if completion.usage:
+                    uni_usage = UniResponseUsage.model_validate(completion.usage, from_attributes=True)
+            else:
+                raise RuntimeError("收到意外的响应类型")
+
+        # 逻辑：如果存在思考内容，将其通过 debug_log 输出
+        if reasoning_text:
+            debug_log(f"[Qwen Thinking]: {reasoning_text}")
+
+        return UniResponse(
+            role="assistant",
+            content=response_text,
+            usage=uni_usage,
+            tool_calls=None,
+        )
+
+    @staticmethod
+    def get_adapter_protocol() -> tuple[str, ...]:
+        return "qwen", "dashscope"
