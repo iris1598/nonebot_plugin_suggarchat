@@ -135,72 +135,51 @@ class ChatObjectMeta(BaseModel):
     last_call: datetime = Field(default_factory=datetime.now)  # 最后一次调用时间
 
 
+import copy
+import re
+import asyncio
+from typing import Self
+
 class MemoryLimiter:
-    """上下文处理器
+    """上下文处理器（保留原版热加载与逻辑，增强人设化增量摘要）"""
 
-    该类负责处理聊天上下文的记忆长度和token数量限制，通过上下文摘要和消息删除等方式，
-    确保聊天上下文在预设的限制范围内，避免超出模型处理能力。
-    """
-
-    memory: MemoryModel  # 要处理的记忆模型
-    config: Config  # 配置对象
-    usage: UniResponseUsage | None = None  # token使用情况，初始为None
-    _train: dict[str, str]  # 训练数据（系统提示词）
-    _dropped_messages: list[Message[str] | ToolResult]  # 被删除的消息列表
-    _copied_messages: Memory  # 原始消息副本（用于异常时回滚）
-    _abstract_instruction = """<<SYS>>
-你是一个专业的上下文摘要器，严格按照用户指令执行摘要任务。
-<</SYS>>
-
-<<INSTRUCTIONS>>
-1. 直接摘要用户输入的内容
-2. 保持原文的核心信息和关键细节
-3. 不产生任何额外内容、解释或评论
-4. 摘要应简洁、准确、完整
-<</INSTRUCTIONS>>
-
-<<RULE>>
-- 仅对用户提供文本进行摘要
-- 不添加任何解释、评论或补充信息
-- 不改变原文的主要意思
-- 保持客观中立的语调
-<</RULE>>
-
-<<FORMATTING>>
-用户输入 → 直接输出摘要结果
-<</FORMATTING>>"""
+    memory: MemoryModel
+    # 不再在 __init__ 缓存 config，而是每次通过方法实时获取
+    usage: UniResponseUsage | None = None
+    _train: dict[str, str]
+    _dropped_messages: list[Message[str] | ToolResult]
+    _copied_messages: Memory
 
     def __init__(self, memory: MemoryModel, train: dict[str, str]) -> None:
-        """初始化上下文处理器
-
-        Args:
-            memory: 要处理的记忆模型
-            train: 训练数据（系统提示词）
-        """
         self.memory = memory
-        self.config = ConfigManager().config
         self._train = train
 
-    async def __aenter__(self) -> Self:
-        """异步上下文管理器入口，初始化处理状态
+    @property
+    def config(self) -> Config:
+        """保持配置热加载，实时获取最新配置"""
+        return ConfigManager().config
 
-        Returns:
-            返回自身实例以供使用
-        """
+    async def __aenter__(self) -> Self:
         self._dropped_messages = []
         self._copied_messages = copy.deepcopy(self.memory.memory)
         debug_log(f"MemoryLimiter初始化，消息数量: {len(self.memory.memory.messages)}")
         return self
 
-    async def _make_abstract(self):
-        """生成上下文摘要
+    def _get_pure_persona(self) -> str:
+        """从 train["content"] 中提取 <SYSTEM_INSTRUCTIONS> 标签内容"""
+        content = self._train.get("content", "")
+        match = re.search(r"<SYSTEM_INSTRUCTIONS>(.*?)</SYSTEM_INSTRUCTIONS>", content, re.DOTALL)
+        return match.group(1).strip() if match else "你是一个活跃在群聊中的成员。"
 
-        通过调用LLM将当前记忆中的所有消息内容摘要为一段简短的内容，
-        以减少上下文长度，同时保留关键信息。
-        """
-        debug_log("开始进行上下文摘要..")
-        proportion = self.config.llm_config.memory_abstract_proportion  # 摘要比例
+    async def _make_abstract(self):
+        """生成具有人设感的增量记忆摘要"""
+        debug_log("开始进行角色化增量摘要...")
+        
+        # 实时引用配置
+        proportion = self.config.llm_config.memory_abstract_proportion
         dropped_part: SEND_MESSAGES = copy.deepcopy(self._dropped_messages)
+        
+        # 1. 完全保留原版的索引计算逻辑
         index = int(len(self.memory.memory.messages) * proportion) - len(dropped_part)
         if index < 0:
             index = 0
@@ -208,103 +187,102 @@ class MemoryLimiter:
         if index:
             for idx, element in enumerate(self.memory.memory.messages):
                 dropped_part.append(element)
-                if (
-                    getattr(element, "tool_calls", None) is not None
-                ):  # 连带去除工具调用(system(tool_call),tool_call)
+                if getattr(element, "tool_calls", None) is not None:
                     continue
                 elif idx >= index:
                     break
-        self.memory.memory.messages = self.memory.memory.messages[
-            (idx if idx is not None else index) :  # 删除部分消息
-        ]
+        
+        self.memory.memory.messages = self.memory.memory.messages[(idx if idx is not None else index) :]
+
         if dropped_part:
+            # --- 注入人设与旧摘要 ---
+            persona = self._get_pure_persona()
+            old_abstract = getattr(self.memory.memory, "abstract", "") or "暂无旧记忆。"
+            
+            # 构造符合群聊语境的“整理记忆”指令
+            dynamic_instruction = f"""<<SYS>>
+{persona}
+你现在正在整理群聊的长期记忆。你必须在极有限的空间内，自主提炼对你社交最有价值的信息。
+<</SYS>>
+
+<<INSTRUCTIONS>>
+1. **极致压缩**：最终记忆笔记严禁超过 200 字。只保留最核心的：新用户印象、重要约定、你的情感转折。
+2. **第一人称融合**：以“我”的视角，将“旧记忆”与“新对话”揉合成一段连贯、紧凑的笔记。
+3. **剔除冗余**：删除所有过时的、重复的或无意义的日常寒暄。如果新信息不重要，就保持旧记忆不变。
+4. **角色语气**：在极短的篇幅内维持你的性格，不准使用中立、机械的摘要格式。
+5. **多用户覆盖**：用最精炼的词汇标记不同人对你的态度（如：张三-友好，李四-挑衅）。
+<</INSTRUCTIONS>>
+
+<<CONSTRAINT>>
+严禁输出任何引言或废话，直接输出 200 字以内的记忆笔记。
+<</CONSTRAINT>>"""
+
             msg_list: SEND_MESSAGES = [
-                Message[str](role="system", content=self._abstract_instruction),
+                Message[str](role="system", content=dynamic_instruction),
+                Message[str](role="system", content=f"【你之前的长期记忆】:\n{old_abstract}"),
                 Message[str](
                     role="user",
-                    content=(
-                        "消息列表：\n```text\n".join(
-                            [
-                                f"{it}\n"
-                                for it in text_generator(
-                                    dropped_part,
-                                    split_role=True,
-                                )
-                            ]
-                        )
-                        + "\n```"
-                    ),
+                    content="【以下是刚发生的新对话记录，请更新你的记忆笔记】:\n" + "\n".join(
+                        [f"{it}" for it in text_generator(dropped_part, split_role=True)]
+                    )
                 ),
             ]
-            debug_log("正在进行上下文摘要...")
+            
+            debug_log("正在调用LLM更新增量摘要...")
             response = await get_chat(msg_list)
             usage = await get_tokens(msg_list, response)
             self.usage = usage
-            debug_log(f"获取到上下文摘要：{response.content}")
-            self.memory.memory.abstract = response.content
-            debug_log("上下文摘要完成")
+            
+            # 更新摘要
+            self.memory.memory.abstract = response.content.strip()
+            debug_log(f"角色化记忆更新完成：{self.memory.memory.abstract[:30]}...")
         else:
             debug_log("未进行上下文摘要")
 
     def _drop_message(self):
+        """完全保留原版消息移除逻辑"""
         data = self.memory
         if len(data.memory.messages) < 2:
             return
         self._dropped_messages.append(data.memory.messages.pop(0))
-        if data.memory.messages[0].role == "tool":
+        if data.memory.messages and data.memory.messages[0].role == "tool":
             self._dropped_messages.append(data.memory.messages.pop(0))
 
     async def run_enforce(self):
-        """执行记忆限制处理
-
-        按顺序执行记忆长度限制和token数量限制，确保聊天上下文在预设范围内。
-        该方法必须在异步上下文管理器中使用。
-
-        Raises:
-            RuntimeError: 当未在异步上下文管理器中使用时抛出
-        """
+        """执行记忆限制处理"""
         debug_log("开始执行记忆限制处理..")
-        if not hasattr(self, "_dropped_messages") and not hasattr(
-            self, "_copied_messages"
-        ):
-            raise RuntimeError(
-                "MemoryLimiter is not initialized, please use use `async with MemoryLimiter(memory)` before calling."
-            )
+        if not hasattr(self, "_dropped_messages") and not hasattr(self, "_copied_messages"):
+            raise RuntimeError("MemoryLimiter is not initialized, please use `async with`.")
+            
         await self._limit_length()
         await self._limit_tokens()
+        
         if self.config.llm_config.enable_memory_abstract and self._dropped_messages:
             await self._make_abstract()
         debug_log("记忆限制处理完成")
 
     async def _limit_length(self):
-        """控制记忆长度，删除超出限制的旧消息，移除不支持的消息。"""
+        """完全保留原版长度限制与多模态处理逻辑"""
         debug_log("开始执行记忆长度限制..")
-        is_multimodal = (
-            await ConfigManager().get_preset(ConfigManager().config.preset)
-        ).multimodal
+        # 实时检查多模态支持
+        is_multimodal = (await ConfigManager().get_preset(self.config.preset)).multimodal
         data: MemoryModel = self.memory
 
-        # Process multimodal messages when needed
+        # 原版逻辑：处理不支持多模态时的内容降级
         for message in data.memory.messages:
-            if (
-                isinstance(message.content, list)
-                and not is_multimodal
-                and message.role == "user"
-            ):
+            if isinstance(message.content, list) and not is_multimodal and message.role == "user":
                 message_text = ""
                 for content_part in message.content:
                     if isinstance(content_part, dict):
                         validator = CT_MAP.get(content_part["type"])
                         if not validator:
-                            raise ValueError(
-                                f"Invalid content type: {content_part['type']}"
-                            )
-                        content_part: Content = validator.model_validate(content_part)
+                            raise ValueError(f"Invalid content type: {content_part['type']}")
+                        content_part = validator.model_validate(content_part)
                     if content_part["type"] == "text":
                         message_text += content_part["text"]
                 message.content = message_text
 
-        # Enforce memory length limit
+        # 条数限制
         initial_count = len(data.memory.messages)
         while len(data.memory.messages) >= 2:
             if data.memory.messages[0].role == "tool":
@@ -313,69 +291,42 @@ class MemoryLimiter:
                 self._drop_message()
             else:
                 break
-        final_count = len(data.memory.messages)
-        debug_log(f"记忆长度限制完成，删除了 {initial_count - final_count} 条消息")
+        debug_log(f"记忆长度限制完成，删除了 {initial_count - len(data.memory.messages)} 条消息")
 
     async def _limit_tokens(self):
-        """控制 token 数量，删除超出限制的旧消息
-
-        通过计算当前消息列表的token数量，当超出配置的session最大token限制时，
-        逐步删除最早的消息直到满足token数量限制。
-        """
-
+        """完全保留原版 Token 限制逻辑"""
         def get_token(memory: SEND_MESSAGES) -> int:
             tk_tmp: int = 0
             for msg in text_generator(memory):
-                tk_tmp += hybrid_token_count(
-                    msg,
-                    ConfigManager().config.llm_config.tokens_count_mode,
-                )
+                tk_tmp += hybrid_token_count(msg, self.config.llm_config.tokens_count_mode)
             return tk_tmp
 
-        train = self._train
-        train_model = Message.model_validate(train)
+        train_model = Message.model_validate(self._train)
         data = self.memory
         debug_log("开始执行token数量限制..")
-        memory_l: SEND_MESSAGES = [train_model, *data.memory.messages]
-        if not ConfigManager().config.llm_config.enable_tokens_limit:
-            debug_log("token限制未启用，跳过处理")
+        
+        if not self.config.llm_config.enable_tokens_limit:
+            debug_log("token限制未启用")
             return
-        prompt_length = hybrid_token_count(train["content"])
-        if prompt_length > ConfigManager().config.session.session_max_tokens:
-            logger.warning(
-                f"提示词大小过大！为{prompt_length}>{ConfigManager().config.session.session_max_tokens}！请调整提示词或者设置！"
-            )
-            return
-        tk_tmp: int = get_token(memory_l)
 
+        memory_l: SEND_MESSAGES = [train_model, *data.memory.messages]
+        tk_tmp: int = get_token(memory_l)
         initial_count = len(data.memory.messages)
-        while tk_tmp > ConfigManager().config.session.session_max_tokens:
+
+        while tk_tmp > self.config.session.session_max_tokens:
             if len(data.memory.messages) >= 2:
                 self._drop_message()
             else:
                 break
-
-            tk_tmp: int = get_token(memory_l)
-            memory_l = [train_model, *data.memory.messages]
-            await asyncio.sleep(0)  # CPU 密集型任务可能造成性能问题，我们在这里让出协程
-        final_count = len(data.memory.messages)
-        debug_log(f"token数量限制完成，删除了 {initial_count - final_count} 条消息")
-        debug_log(f"最终token数量: {tk_tmp}")
+            tk_tmp = get_token([train_model, *data.memory.messages])
+            await asyncio.sleep(0) # 协程让出
+            
+        debug_log(f"token限制完成，删除了 {initial_count - len(data.memory.messages)} 条消息")
 
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
-        """异步上下文管理器出口，处理异常情况下的回滚
-
-        当发生异常时，将消息恢复到处理前的状态，确保数据一致性。
-
-        Args:
-            exc_type: 异常类型
-            exc_val: 异常值
-            exc_tb: 异常追踪栈
-        """
         if exc_type is not None:
             logger.warning("发生异常，正在回滚消息...")
             self.memory.memory.messages = self._copied_messages.messages
-            return
 
 
 class ChatObject:

@@ -118,7 +118,7 @@ async def _(event: BeforeChatEvent):
         f"2. 自由决策：你可以根据对话内容自由决定是否更新好感度或评价。**若不需要更新，则不输出下方标记**。\n"
         f"3. 标记格式（仅在需要更新时置于回复末尾）：\n"
         f"   - [FAV:±数值]：改变好感度（范围 -5 到 +5）。\n"
-        f"   - [EVAL:新评价]：如果你对用户的看法发生了改变，请输出此标记更新评价。\n"
+        f"   - [EVAL:新评价]：如果你对用户的看法发生了改变，请输出此标记更新评价（限制20个字以内）。\n"
         f"   - [STK:分类名]：发送表情包，可选类别：{', '.join(categories)}。]\n"
     )
 
@@ -150,6 +150,9 @@ async def _(bot: Bot, event: ChatEvent):
     clean_text = re.sub(r'\[FAV:[+-]?\d+\]', '', response)
     clean_text = re.sub(r'\[EVAL:.*?\]', '', clean_text)
     clean_text = re.sub(r'\[STK:.*?\]', '', clean_text).strip()
+    # --- 新增：删除多余空行 ---
+    clean_text = re.sub(r'\n{2,}', '\n', clean_text)
+    clean_text = clean_text.strip()
     event.model_response = clean_text 
     
     # 3. 解析变动（如果标签不存在，则 change=0, new_eval=None）
