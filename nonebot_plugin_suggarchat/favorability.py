@@ -135,25 +135,34 @@ async def _(event: BeforeChatEvent):
 
 chat_matcher = Matcher(EventTypeEnum.CHAT, priority=1)
 
+# 定义统一的正则常量，支持中英文冒号，允许标记内部有微量空格
+RE_FAV = re.compile(r'\[FAV\s*[:：]\s*([+-]?\d+)\]', re.I)
+RE_EVAL = re.compile(r'\[EVAL\s*[:：]\s*(.*?)\]', re.I)
+RE_STK = re.compile(r'\[STK\s*[:：]\s*(.*?)\]', re.I)
+
 @chat_matcher.handle()
 async def _(bot: Bot, event: ChatEvent):
     response = event.model_response
+    if not response: return
+    
     nbevent = event.get_nonebot_event()
     if not isinstance(nbevent, MessageEvent): return
 
-    # 1. 提取所有标记
-    fav_match = re.search(r'\[FAV[:：]([+-]?\d+)\]', response)
-    eval_match = re.search(r'\[EVAL[:：](.*?)\]', response)
-    stk_matches = re.findall(r'\[STK[:：](.*?)\]', response)
+    # 1. 提取标记
+    fav_match = RE_FAV.search(response)
+    eval_match = RE_EVAL.search(response)
+    stk_matches = RE_STK.findall(response)
     
-    # 2. 彻底清理文本
-    clean_text = re.sub(r'\[FAV:[+-]?\d+\]', '', response)
-    clean_text = re.sub(r'\[EVAL:.*?\]', '', clean_text)
-    clean_text = re.sub(r'\[STK:.*?\]', '', clean_text).strip()
-    # --- 新增：删除多余空行 ---
-    clean_text = re.sub(r'\n{2,}', '\n', clean_text)
-    clean_text = clean_text.strip()
-    event.model_response = clean_text 
+    # 2. 彻底清理文本 (按顺序剔除所有标记)
+    clean_text = RE_FAV.sub('', response)
+    clean_text = RE_EVAL.sub('', clean_text)
+    clean_text = RE_STK.sub('', clean_text)
+    
+    # 清理多余空行和前后空格
+    clean_text = re.sub(r'\n\s*\n', '\n', clean_text).strip()
+    
+    # 关键：将清理后的文本写回 event
+    event.model_response = clean_text
     
     # 3. 解析变动（如果标签不存在，则 change=0, new_eval=None）
     raw_val = int(fav_match.group(1)) if fav_match else 0
