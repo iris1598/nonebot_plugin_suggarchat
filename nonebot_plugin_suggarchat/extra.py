@@ -1,4 +1,5 @@
 # extra.py - 严格遵循 nonebot-plugin-chatrecorder + uninfo 官方文档
+
 import json
 import re
 import asyncio
@@ -6,24 +7,25 @@ import random
 import httpx
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
 from nonebot import logger, require, on_command
 from nonebot.adapters.onebot.v11 import Bot, MessageEvent, GroupMessageEvent, Message, MessageSegment
 from nonebot.params import CommandArg
 from nonebot.permission import SUPERUSER
-from nonebot_plugin_uninfo import get_session  # 🔥 异步函数，需要 await get_session(bot, event)
 
-# 🔥 声明插件依赖
 require("nonebot_plugin_chatrecorder")
 require("nonebot_plugin_uninfo")
+
+from nonebot_plugin_uninfo import get_session
 
 from .event import EventTypeEnum, BeforeChatEvent, ChatEvent
 from .matcher import Matcher
 
 # ================= 配置区 =================
 SUMMARY_CONFIG = {
-    "api_url": " ",
-    "api_key": " ",  # 必填
-    "model": " ",  # 推荐 7B/14B 级别
+    "api_url": "",
+    "api_key": "",  # 必填
+    "model": "",  # 推荐 7B/14B 级别
     "timeout": 15,
     "max_history_minutes": 60,
     "max_web_chars": 600
