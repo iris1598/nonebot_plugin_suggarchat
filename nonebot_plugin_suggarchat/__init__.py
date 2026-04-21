@@ -48,4 +48,4 @@ __all__ = [
     "matcher_manager",
     "preprocess",
 ]
-from . import extra
+from . import favorability
